@@ -608,7 +608,7 @@ fn test_get_score_history_for_unknown_user_is_empty() {
 
     client.initialize(&admin);
 
-    let history = client.get_score_history(&user);
+    let history = client.get_score_history(&user, &0, &10);
     assert_eq!(history.len(), 0);
 }
 
@@ -626,35 +626,23 @@ fn test_score_history_tracks_and_caps_recent_updates() {
     client.initialize(&admin);
     client.mint(&user, &500, &create_test_hash(&env, 7), &None);
 
-    for sequence in 1..=12u32 {
+    // Add 52 updates — exceeds MAX_SCORE_HISTORY_ENTRIES (50)
+    for sequence in 1..=52u32 {
         env.ledger().set_sequence_number(sequence);
         client.update_score(&user, &100, &None);
     }
 
-    let history = client.get_score_history(&user);
-    assert_eq!(history.len(), 10);
+    // Total history must be capped at MAX_SCORE_HISTORY_ENTRIES
+    let history = client.get_score_history(&user, &0, &100);
+    assert_eq!(history.len(), RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES);
 
+    // Oldest entry should be the 3rd update (sequences 1 and 2 were rotated out)
     let first = history.get(0).unwrap();
-    assert_eq!(
-        first,
-        ScoreHistoryEntry {
-            ledger: 3,
-            old_score: 502,
-            new_score: 503,
-            reason: symbol_short!("REPAY"),
-        }
-    );
+    assert_eq!(first.ledger, 3);
 
-    let last = history.get(9).unwrap();
-    assert_eq!(
-        last,
-        ScoreHistoryEntry {
-            ledger: 12,
-            old_score: 511,
-            new_score: 512,
-            reason: symbol_short!("REPAY"),
-        }
-    );
+    // Newest entry should be the 52nd update
+    let last = history.get(RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES - 1).unwrap();
+    assert_eq!(last.ledger, 52);
 }
 
 #[test]
@@ -766,14 +754,14 @@ fn test_transfer_moves_identity_state_to_new_wallet() {
     assert_eq!(client.get_score(&old_wallet), 0);
     assert_eq!(client.get_default_count(&old_wallet), 0);
     assert!(!client.is_seized(&old_wallet));
-    assert_eq!(client.get_score_history(&old_wallet).len(), 0);
+    assert_eq!(client.get_score_history(&old_wallet, &0, &10).len(), 0);
 
     let metadata = client.get_metadata(&new_wallet).unwrap();
     assert_eq!(metadata.score, 503);
     assert_eq!(metadata.history_hash, create_test_hash(&env, 21));
     assert_eq!(client.get_default_count(&new_wallet), 1);
     assert!(client.is_seized(&new_wallet));
-    assert_eq!(client.get_score_history(&new_wallet).len(), 1);
+    assert_eq!(client.get_score_history(&new_wallet, &0, &10).len(), 1);
 }
 
 #[test]
@@ -1007,4 +995,180 @@ fn test_is_remint_approved_cleared_after_remint() {
     // Remint consumes the approval
     client.mint(&user, &600, &create_test_hash(&env, 34), &None);
     assert!(!client.is_remint_approved(&user));
+}
+
+#[test]
+fn test_history_bounded_at_max_entries() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.mint(&user, &300, &create_test_hash(&env, 40), &None);
+
+    // Add more updates than MAX_SCORE_HISTORY_ENTRIES
+    let over_limit = RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES + 10;
+    for seq in 1..=over_limit {
+        env.ledger().set_sequence_number(seq);
+        client.update_score(&user, &100, &None);
+    }
+
+    let history = client.get_score_history(&user, &0, &200);
+    assert_eq!(history.len(), RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES);
+}
+
+#[test]
+fn test_history_oldest_entries_rotated_out() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.mint(&user, &300, &create_test_hash(&env, 41), &None);
+
+    let max = RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES;
+
+    // Fill to capacity
+    for seq in 1..=max {
+        env.ledger().set_sequence_number(seq);
+        client.update_score(&user, &100, &None);
+    }
+
+    // Add one more — oldest should be rotated out
+    env.ledger().set_sequence_number(max + 1);
+    client.update_score(&user, &100, &None);
+
+    let history = client.get_score_history(&user, &0, &200);
+    assert_eq!(history.len(), max);
+
+    // First entry should now be ledger 2 (ledger 1 was rotated out)
+    let first = history.get(0).unwrap();
+    assert_eq!(first.ledger, 2);
+
+    // Last entry should be the newest
+    let last = history.get(max - 1).unwrap();
+    assert_eq!(last.ledger, max + 1);
+}
+
+#[test]
+fn test_get_score_history_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.mint(&user, &300, &create_test_hash(&env, 42), &None);
+
+    // Add 20 updates
+    for seq in 1..=20u32 {
+        env.ledger().set_sequence_number(seq);
+        client.update_score(&user, &100, &None);
+    }
+
+    // First page: offset=0, limit=5
+    let page1 = client.get_score_history(&user, &0, &5);
+    assert_eq!(page1.len(), 5);
+    assert_eq!(page1.get(0).unwrap().ledger, 1);
+    assert_eq!(page1.get(4).unwrap().ledger, 5);
+
+    // Second page: offset=5, limit=5
+    let page2 = client.get_score_history(&user, &5, &5);
+    assert_eq!(page2.len(), 5);
+    assert_eq!(page2.get(0).unwrap().ledger, 6);
+    assert_eq!(page2.get(4).unwrap().ledger, 10);
+
+    // Offset beyond length returns empty
+    let empty = client.get_score_history(&user, &100, &10);
+    assert_eq!(empty.len(), 0);
+
+    // Limit larger than remaining entries returns only what's left
+    let tail = client.get_score_history(&user, &18, &10);
+    assert_eq!(tail.len(), 2);
+}
+
+#[test]
+fn test_history_gas_cost_constant_never_exceeds_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.mint(&user, &300, &create_test_hash(&env, 43), &None);
+
+    let max = RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES;
+
+    // Run well past the cap
+    for seq in 1..=(max * 3) {
+        env.ledger().set_sequence_number(seq);
+        client.update_score(&user, &100, &None);
+    }
+
+    // History must never exceed the cap regardless of activity
+    let history = client.get_score_history(&user, &0, &200);
+    assert_eq!(history.len(), max);
+}
+
+#[test]
+fn test_migration_truncates_existing_unbounded_history() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.mint(&user, &500, &create_test_hash(&env, 44), &None);
+
+    let max = RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES;
+
+    // Manually inject an oversized history (simulating pre-migration data)
+    let oversized_count = max + 20;
+    let mut oversized: Vec<ScoreHistoryEntry> = Vec::new(&env);
+    for i in 0..oversized_count {
+        oversized.push_back(ScoreHistoryEntry {
+            ledger: i + 1,
+            old_score: 500,
+            new_score: 501,
+            reason: symbol_short!("REPAY"),
+        });
+    }
+    use super::DataKey;
+    env.as_contract(&contract_id, || {
+        let key = DataKey::ScoreHistory(user.clone());
+        env.storage().persistent().set(&key, &oversized);
+    });
+
+    // Reading history should trigger migration and truncate to max
+    let history = client.get_score_history(&user, &0, &200);
+    assert_eq!(history.len(), max);
+
+    // Should keep the most recent entries (highest ledger numbers)
+    let first = history.get(0).unwrap();
+    assert_eq!(first.ledger, 21); // entries 1..20 were dropped
+
+    let last = history.get(max - 1).unwrap();
+    assert_eq!(last.ledger, oversized_count);
 }
