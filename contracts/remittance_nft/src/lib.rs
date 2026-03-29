@@ -794,7 +794,12 @@ impl RemittanceNFT {
         Self::default_burn_threshold(&env)
     }
 
-    pub fn get_score_history(env: Env, user: Address, offset: u32, limit: u32) -> Vec<ScoreHistoryEntry> {
+    pub fn get_score_history(
+        env: Env,
+        user: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<ScoreHistoryEntry> {
         let history = Self::get_score_history_or_default(&env, &user);
         let len = history.len();
         if offset >= len {

@@ -641,7 +641,9 @@ fn test_score_history_tracks_and_caps_recent_updates() {
     assert_eq!(first.ledger, 3);
 
     // Newest entry should be the 52nd update
-    let last = history.get(RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES - 1).unwrap();
+    let last = history
+        .get(RemittanceNFT::MAX_SCORE_HISTORY_ENTRIES - 1)
+        .unwrap();
     assert_eq!(last.ledger, 52);
 }
 
